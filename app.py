@@ -1,10 +1,13 @@
 import streamlit as st
 import pandas as pd
 import requests
+import json
+import os
 
 # Configuration
 SLEEPER_BASE_URL = "https://api.sleeper.app/v1"
 DRAFT_ID = "1255223076447072256"
+RANKINGS_FILE = "user_rankings.json"
 
 # User configuration with cool emojis
 USER_OPTIONS = {
@@ -13,6 +16,36 @@ USER_OPTIONS = {
     'jack': '🚀 Jack',
     'kyle': '💎 Kyle'
 }
+
+def save_rankings():
+    """Save user rankings to JSON file"""
+    try:
+        with open(RANKINGS_FILE, 'w') as f:
+            json.dump(st.session_state.user_rankings, f, indent=2)
+    except Exception as e:
+        st.error(f"Error saving rankings: {e}")
+
+def load_rankings():
+    """Load user rankings from JSON file"""
+    try:
+        if os.path.exists(RANKINGS_FILE):
+            with open(RANKINGS_FILE, 'r') as f:
+                return json.load(f)
+        else:
+            return {
+                'nathan': [],
+                'nathaniel': [],
+                'jack': [],
+                'kyle': []
+            }
+    except Exception as e:
+        st.error(f"Error loading rankings: {e}")
+        return {
+            'nathan': [],
+            'nathaniel': [],
+            'jack': [],
+            'kyle': []
+        }
 
 def load_sleeper_players():
     """Load all NFL players from Sleeper API"""
@@ -46,20 +79,67 @@ def match_players_to_sleeper(df, sleeper_players, drafted_player_ids):
     df['drafted'] = False
     df['sleeper_id'] = None
     
+    # Manual overrides for players that should be marked as drafted
+    manual_drafted_players = [
+        'Josh Allen'  # Having matching issues, manually mark as drafted
+    ]
+    
+    # Manual mappings for problematic names
+    name_mappings = {
+        'Josh Allen': ['Josh Allen'],
+        'Patrick Mahomes II': ['Patrick Mahomes', 'Patrick Mahomes II'],
+        'Brian Thomas Jr.': ['Brian Thomas Jr.', 'Brian Thomas'],
+        'Marvin Harrison Jr.': ['Marvin Harrison Jr.', 'Marvin Harrison']
+    }
+    
     for idx, row in df.iterrows():
         player_name = row['PLAYER NAME'].strip()
+        found_match = False
+        
+        # Check manual drafted overrides first
+        if player_name in manual_drafted_players:
+            df.at[idx, 'drafted'] = True
+            df.at[idx, 'sleeper_id'] = 'manual_override'
+            found_match = True
+            continue
         
         # Try to find matching Sleeper player
         for sleeper_id, sleeper_player in sleeper_players.items():
             if sleeper_player:
                 sleeper_full_name = f"{sleeper_player.get('first_name', '')} {sleeper_player.get('last_name', '')}".strip()
                 
-                # Check if names match (case insensitive)
+                # Check direct name match
                 if player_name.lower() == sleeper_full_name.lower():
                     df.at[idx, 'sleeper_id'] = sleeper_id
                     if sleeper_id in drafted_player_ids:
                         df.at[idx, 'drafted'] = True
+                    found_match = True
                     break
+                
+                # Check manual mappings
+                if player_name in name_mappings:
+                    for alt_name in name_mappings[player_name]:
+                        if alt_name.lower() == sleeper_full_name.lower():
+                            df.at[idx, 'sleeper_id'] = sleeper_id
+                            if sleeper_id in drafted_player_ids:
+                                df.at[idx, 'drafted'] = True
+                            found_match = True
+                            break
+                    if found_match:
+                        break
+                
+                # Try partial matching for Jr./II cases
+                if not found_match:
+                    # Remove suffixes for comparison
+                    fantasy_base = player_name.replace(' Jr.', '').replace(' II', '').replace(' III', '').strip().lower()
+                    sleeper_base = sleeper_full_name.replace(' Jr.', '').replace(' II', '').replace(' III', '').strip().lower()
+                    
+                    if fantasy_base == sleeper_base:
+                        df.at[idx, 'sleeper_id'] = sleeper_id
+                        if sleeper_id in drafted_player_ids:
+                            df.at[idx, 'drafted'] = True
+                        found_match = True
+                        break
     
     return df
 
@@ -88,6 +168,8 @@ def main():
         st.session_state.drafted_players = set()
     if 'last_draft_refresh' not in st.session_state:
         st.session_state.last_draft_refresh = None
+    if 'user_rankings' not in st.session_state:
+        st.session_state.user_rankings = load_rankings()
     # Sidebar for user selection
     with st.sidebar:
         st.header("👤 User Selection")
@@ -148,7 +230,7 @@ def main():
         return
     
     # Main content
-    tab1 = st.tabs(["📊 All Players"])[0]
+    tab1, tab2, tab3 = st.tabs(["📊 All Players", "🎯 My Rankings", "👥 Team Consensus"])
     
     with tab1:
         st.header("📊 FantasyPros 2025 Dynasty Rankings")
@@ -176,6 +258,14 @@ def main():
             
             # Prepare display dataframe
             display_df = display_data[['RK', 'TIERS', 'PLAYER NAME', 'TEAM', 'POS', 'AGE', 'BEST', 'WORST', 'AVG.', 'STD.DEV', 'ECR VS. ADP']].copy()
+            
+            # Format ADP and STD.DEV to 2 decimal places
+            if 'AVG.' in display_df.columns:
+                display_df['ADP'] = display_df['AVG.'].round(2)
+                display_df = display_df.drop('AVG.', axis=1)
+            
+            if 'STD.DEV' in display_df.columns:
+                display_df['STD.DEV'] = display_df['STD.DEV'].round(2)
             
             # Color coding function for drafted players
             def highlight_drafted(row):
@@ -223,6 +313,195 @@ def main():
         else:
             st.error("❌ Could not load player data. Make sure the CSV file is in your repository.")
             st.info("💡 Make sure 'FantasyPros_2025_Dynasty_ALL_Rankings.csv' is in the same folder as your app.py")
+    
+    with tab2:
+        st.header(f"🎯 {USER_OPTIONS[selected_user]} Rankings")
+        
+        if st.session_state.players_data is not None:
+            # Get available (undrafted) players only
+            available_players = st.session_state.players_data[~st.session_state.players_data['drafted']].copy()
+            
+            if len(available_players) == 0:
+                st.info("No available players to rank. Refresh draft data first.")
+                return
+            
+            st.markdown(f"**Available Players to Rank:** {len(available_players)}")
+            
+            # Get current user's rankings
+            current_rankings = st.session_state.user_rankings[selected_user]
+            
+            # Filter current rankings to only include available players
+            valid_rankings = [name for name in current_rankings if name in available_players['PLAYER NAME'].values]
+            st.session_state.user_rankings[selected_user] = valid_rankings
+            
+            col1, col2 = st.columns([1, 1])
+            
+            with col1:
+                st.subheader("Your Current Rankings")
+                
+                if valid_rankings:
+                    for i, player_name in enumerate(valid_rankings):
+                        player_row = available_players[available_players['PLAYER NAME'] == player_name]
+                        if not player_row.empty:
+                            player = player_row.iloc[0]
+                            
+                            rank_col, name_col, btn_col = st.columns([0.5, 3, 1])
+                            
+                            with rank_col:
+                                st.write(f"**{i+1}**")
+                            
+                            with name_col:
+                                st.write(f"{player_name} ({player['POS']} - {player['TEAM']})")
+                            
+                            with btn_col:
+                                if st.button("❌", key=f"remove_{selected_user}_{i}"):
+                                    st.session_state.user_rankings[selected_user].remove(player_name)
+                                    save_rankings()  # Save after removing
+                                    st.rerun()
+                            
+                            # Move up/down buttons
+                            move_col1, move_col2 = st.columns(2)
+                            with move_col1:
+                                if i > 0 and st.button("⬆️", key=f"up_{selected_user}_{i}"):
+                                    rankings = st.session_state.user_rankings[selected_user]
+                                    rankings[i], rankings[i-1] = rankings[i-1], rankings[i]
+                                    save_rankings()  # Save after reordering
+                                    st.rerun()
+                            
+                            with move_col2:
+                                if i < len(valid_rankings) - 1 and st.button("⬇️", key=f"down_{selected_user}_{i}"):
+                                    rankings = st.session_state.user_rankings[selected_user]
+                                    rankings[i], rankings[i+1] = rankings[i+1], rankings[i]
+                                    save_rankings()  # Save after reordering
+                                    st.rerun()
+                            
+                            st.divider()
+                else:
+                    st.info("No players ranked yet. Add players from the available list →")
+            
+            with col2:
+                st.subheader("Available Players")
+                
+                # Filter/search options
+                search_term = st.text_input("🔍 Search players", placeholder="Enter player name...")
+                
+                col_pos, col_team = st.columns(2)
+                with col_pos:
+                    positions = ['All'] + sorted(available_players['POS'].str.extract(r'([A-Z]+)')[0].unique())
+                    selected_position = st.selectbox("Position", positions)
+                
+                with col_team:
+                    teams = ['All'] + sorted(available_players['TEAM'].unique())
+                    selected_team = st.selectbox("Team", teams)
+                
+                # Apply filters
+                filtered_players = available_players.copy()
+                
+                if search_term:
+                    filtered_players = filtered_players[
+                        filtered_players['PLAYER NAME'].str.contains(search_term, case=False, na=False)
+                    ]
+                
+                if selected_position != 'All':
+                    filtered_players = filtered_players[
+                        filtered_players['POS'].str.contains(selected_position, case=False, na=False)
+                    ]
+                
+                if selected_team != 'All':
+                    filtered_players = filtered_players[filtered_players['TEAM'] == selected_team]
+                
+                # Remove already ranked players
+                unranked_players = filtered_players[
+                    ~filtered_players['PLAYER NAME'].isin(valid_rankings)
+                ]
+                
+                st.write(f"Showing {len(unranked_players)} unranked players")
+                
+                # Display available players with add buttons
+                for _, player in unranked_players.head(20).iterrows():
+                    player_col, add_col = st.columns([4, 1])
+                    
+                    with player_col:
+                        st.write(f"**{player['PLAYER NAME']}**")
+                        st.caption(f"{player['POS']} - {player['TEAM']} | ECR: #{player['RK']}")
+                    
+                    with add_col:
+                        if st.button("➕", key=f"add_{selected_user}_{player['PLAYER NAME']}"):
+                            st.session_state.user_rankings[selected_user].append(player['PLAYER NAME'])
+                            save_rankings()  # Save after adding
+                            st.success(f"Added {player['PLAYER NAME']}!")
+                            st.rerun()
+                    
+                    st.divider()
+        
+        else:
+            st.error("❌ Please load player data first from Tab 1")
+    
+    with tab3:
+        st.header("👥 Team Consensus Rankings")
+        
+        if st.session_state.players_data is not None:
+            # Get all ranked players across all users
+            all_ranked_players = set()
+            for user_rankings in st.session_state.user_rankings.values():
+                all_ranked_players.update(user_rankings)
+            
+            if all_ranked_players:
+                consensus_data = []
+                
+                for player_name in all_ranked_players:
+                    # Get player data
+                    player_row = st.session_state.players_data[
+                        st.session_state.players_data['PLAYER NAME'] == player_name
+                    ]
+                    
+                    if not player_row.empty and not player_row.iloc[0]['drafted']:
+                        player = player_row.iloc[0]
+                        
+                        # Calculate rankings from each user
+                        user_ranks = {}
+                        rank_values = []
+                        
+                        for user, rankings in st.session_state.user_rankings.items():
+                            if player_name in rankings:
+                                rank = rankings.index(player_name) + 1
+                                user_ranks[user] = rank
+                                rank_values.append(rank)
+                            else:
+                                user_ranks[user] = None
+                        
+                        # Calculate average ranking
+                        avg_rank = sum(rank_values) / len(rank_values) if rank_values else float('inf')
+                        
+                        consensus_data.append({
+                            'Player': player_name,
+                            'Position': player['POS'],
+                            'Team': player['TEAM'],
+                            'ADP': round(player['AVG.'], 2) if pd.notna(player['AVG.']) else '-',
+                            'Avg Rank': f"{avg_rank:.1f}" if avg_rank != float('inf') else '-',
+                            '🔥 Nathan': user_ranks['nathan'] or '-',
+                            '⚡ Nathaniel': user_ranks['nathaniel'] or '-',
+                            '🚀 Jack': user_ranks['jack'] or '-',
+                            '💎 Kyle': user_ranks['kyle'] or '-',
+                            'Ranked By': f"{len(rank_values)}/4"
+                        })
+                
+                # Sort by average ranking
+                consensus_data.sort(key=lambda x: float(x['Avg Rank']) if x['Avg Rank'] != '-' else float('inf'))
+                
+                if consensus_data:
+                    st.markdown(f"**Total Ranked Players:** {len(consensus_data)}")
+                    
+                    # Convert to dataframe and display
+                    df = pd.DataFrame(consensus_data)
+                    st.dataframe(df, use_container_width=True, hide_index=True, height=600)
+                else:
+                    st.info("No consensus data available yet.")
+            else:
+                st.info("No players have been ranked yet. Start ranking players in Tab 2!")
+        
+        else:
+            st.error("❌ Please load player data first from Tab 1")
 
 if __name__ == "__main__":
-    main() 
+    main()

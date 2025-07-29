@@ -28,13 +28,30 @@ def setup_github():
             repo_owner = st.secrets["github"]["repo_owner"]
             repo_name = st.secrets["github"]["repo_name"]
             
+            # Debug info
+            st.write(f"🔍 Attempting to connect to: {repo_owner}/{repo_name}")
+            
             g = Github(token)
+            
+            # Test authentication first
+            user = g.get_user()
+            st.write(f"✅ Authenticated as: {user.login}")
+            
+            # Try to get the repository
             repo = g.get_user(repo_owner).get_repo(repo_name)
+            st.write(f"✅ Repository found: {repo.full_name}")
+            
             return repo
         else:
+            st.warning("⚠️ GitHub secrets not found")
             return None
     except Exception as e:
-        st.error(f"Error setting up GitHub: {e}")
+        st.error(f"❌ Error setting up GitHub: {e}")
+        st.write("**Debug info:**")
+        if "github" in st.secrets:
+            st.write(f"- Repo owner: {st.secrets['github']['repo_owner']}")
+            st.write(f"- Repo name: {st.secrets['github']['repo_name']}")
+            st.write(f"- Token starts with: {st.secrets['github']['token'][:10]}...")
         return None
 
 def save_rankings_to_github(repo):
@@ -441,42 +458,124 @@ def main():
                 st.subheader("Your Current Rankings")
                 
                 if valid_rankings:
-                    for i, player_name in enumerate(valid_rankings):
-                        player_row = available_players[available_players['PLAYER NAME'] == player_name]
-                        if not player_row.empty:
-                            player = player_row.iloc[0]
+                    st.info("💡 Change the rank number to quickly reorder players!")
+                    
+                    # Create a form for bulk reordering
+                    with st.form(f"reorder_form_{selected_user}"):
+                        new_positions = {}
+                        
+                        for i, player_name in enumerate(valid_rankings):
+                            player_row = available_players[available_players['PLAYER NAME'] == player_name]
+                            if not player_row.empty:
+                                player = player_row.iloc[0]
+                                
+                                rank_col, name_col, new_rank_col, remove_col = st.columns([0.8, 3, 1.2, 0.8])
+                                
+                                with rank_col:
+                                    st.write(f"**{i+1}**")
+                                
+                                with name_col:
+                                    st.write(f"{player_name}")
+                                    st.caption(f"{player['POS']} - {player['TEAM']} | ADP: {player['AVG.']:.2f}")
+                                
+                                with new_rank_col:
+                                    new_rank = st.number_input(
+                                        "New Rank",
+                                        min_value=1,
+                                        max_value=len(valid_rankings),
+                                        value=i+1,
+                                        key=f"rank_{selected_user}_{i}",
+                                        label_visibility="collapsed"
+                                    )
+                                    if new_rank != i+1:
+                                        new_positions[player_name] = new_rank - 1  # Convert to 0-based index
+                                
+                                with remove_col:
+                                    if st.checkbox("🗑️", key=f"remove_check_{selected_user}_{i}", label_visibility="collapsed"):
+                                        new_positions[player_name] = -1  # Mark for removal
+                        
+                        # Submit button for bulk changes
+                        col_submit, col_clear = st.columns(2)
+                        with col_submit:
+                            submit_changes = st.form_submit_button("✅ Apply Changes", use_container_width=True)
+                        with col_clear:
+                            clear_all = st.form_submit_button("🗑️ Clear All Rankings", use_container_width=True)
+                        
+                        if submit_changes and new_positions:
+                            # Apply all changes at once
+                            current_rankings = st.session_state.user_rankings[selected_user].copy()
                             
-                            rank_col, name_col, btn_col = st.columns([0.5, 3, 1])
+                            # Remove players marked for deletion
+                            players_to_remove = [p for p, pos in new_positions.items() if pos == -1]
+                            for player in players_to_remove:
+                                if player in current_rankings:
+                                    current_rankings.remove(player)
                             
-                            with rank_col:
-                                st.write(f"**{i+1}**")
+                            # Reorder remaining players
+                            reorder_changes = {p: pos for p, pos in new_positions.items() if pos != -1}
+                            if reorder_changes:
+                                # Create new ordering
+                                new_rankings = current_rankings.copy()
+                                
+                                # Remove players that are being moved
+                                for player in reorder_changes.keys():
+                                    if player in new_rankings:
+                                        new_rankings.remove(player)
+                                
+                                # Insert players at their new positions
+                                for player, new_pos in sorted(reorder_changes.items(), key=lambda x: x[1]):
+                                    new_rankings.insert(new_pos, player)
+                                
+                                current_rankings = new_rankings
                             
-                            with name_col:
-                                st.write(f"{player_name} ({player['POS']} - {player['TEAM']})")
+                            # Update session state and save
+                            st.session_state.user_rankings[selected_user] = current_rankings
+                            save_rankings_to_github(st.session_state.github_repo)
+                            st.success("✅ Rankings updated!")
+                            st.rerun()
+                        
+                        elif clear_all:
+                            st.session_state.user_rankings[selected_user] = []
+                            save_rankings_to_github(st.session_state.github_repo)
+                            st.success("🗑️ All rankings cleared!")
+                            st.rerun()
+                    
+                    # Quick action buttons
+                    st.subheader("Quick Actions")
+                    col1, col2, col3 = st.columns(3)
+                    
+                    with col1:
+                        if st.button("🔀 Randomize Order"):
+                            import random
+                            current = st.session_state.user_rankings[selected_user].copy()
+                            random.shuffle(current)
+                            st.session_state.user_rankings[selected_user] = current
+                            save_rankings_to_github(st.session_state.github_repo)
+                            st.rerun()
+                    
+                    with col2:
+                        if st.button("↩️ Reverse Order"):
+                            st.session_state.user_rankings[selected_user].reverse()
+                            save_rankings_to_github(st.session_state.github_repo)
+                            st.rerun()
+                    
+                    with col3:
+                        if st.button("📋 Copy from ECR"):
+                            # Sort current rankings by ECR
+                            current = st.session_state.user_rankings[selected_user]
+                            ranked_with_ecr = []
+                            for player_name in current:
+                                player_row = available_players[available_players['PLAYER NAME'] == player_name]
+                                if not player_row.empty:
+                                    ecr = player_row.iloc[0]['RK']
+                                    ranked_with_ecr.append((player_name, ecr))
                             
-                            with btn_col:
-                                if st.button("❌", key=f"remove_{selected_user}_{i}"):
-                                    st.session_state.user_rankings[selected_user].remove(player_name)
-                                    save_rankings_to_github(st.session_state.github_repo)
-                                    st.rerun()
-                            
-                            # Move up/down buttons
-                            move_col1, move_col2 = st.columns(2)
-                            with move_col1:
-                                if i > 0 and st.button("⬆️", key=f"up_{selected_user}_{i}"):
-                                    rankings = st.session_state.user_rankings[selected_user]
-                                    rankings[i], rankings[i-1] = rankings[i-1], rankings[i]
-                                    save_rankings_to_github(st.session_state.github_repo)
-                                    st.rerun()
-                            
-                            with move_col2:
-                                if i < len(valid_rankings) - 1 and st.button("⬇️", key=f"down_{selected_user}_{i}"):
-                                    rankings = st.session_state.user_rankings[selected_user]
-                                    rankings[i], rankings[i+1] = rankings[i+1], rankings[i]
-                                    save_rankings_to_github(st.session_state.github_repo)
-                                    st.rerun()
-                            
-                            st.divider()
+                            # Sort by ECR and update rankings
+                            ranked_with_ecr.sort(key=lambda x: x[1])
+                            st.session_state.user_rankings[selected_user] = [player for player, ecr in ranked_with_ecr]
+                            save_rankings_to_github(st.session_state.github_repo)
+                            st.rerun()
+                
                 else:
                     st.info("No players ranked yet. Add players from the available list →")
             

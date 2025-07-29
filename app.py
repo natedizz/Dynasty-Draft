@@ -225,4 +225,4 @@ def main():
             st.info("💡 Make sure 'FantasyPros_2025_Dynasty_ALL_Rankings.csv' is in the same folder as your app.py")
 
 if __name__ == "__main__":
-    main()
+    main() 

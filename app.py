@@ -3,6 +3,8 @@ import pandas as pd
 import requests
 import json
 import os
+from github import Github
+import base64
 
 # Configuration
 SLEEPER_BASE_URL = "https://api.sleeper.app/v1"
@@ -17,16 +19,98 @@ USER_OPTIONS = {
     'kyle': '💎 Kyle'
 }
 
-def save_rankings():
-    """Save user rankings to JSON file"""
+# GitHub setup
+def setup_github():
+    """Setup GitHub connection"""
+    try:
+        if "github" in st.secrets:
+            token = st.secrets["github"]["token"]
+            repo_owner = st.secrets["github"]["repo_owner"]
+            repo_name = st.secrets["github"]["repo_name"]
+            
+            g = Github(token)
+            repo = g.get_user(repo_owner).get_repo(repo_name)
+            return repo
+        else:
+            return None
+    except Exception as e:
+        st.error(f"Error setting up GitHub: {e}")
+        return None
+
+def save_rankings_to_github(repo):
+    """Save user rankings to GitHub repository"""
+    try:
+        if repo is None:
+            # Fallback to local file
+            save_rankings_local()
+            return
+        
+        # Convert rankings to JSON
+        rankings_json = json.dumps(st.session_state.user_rankings, indent=2)
+        
+        try:
+            # Try to get existing file
+            file = repo.get_contents(RANKINGS_FILE)
+            # Update existing file
+            repo.update_file(
+                RANKINGS_FILE,
+                f"Update rankings - {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')}",
+                rankings_json,
+                file.sha
+            )
+        except:
+            # File doesn't exist, create it
+            repo.create_file(
+                RANKINGS_FILE,
+                f"Create rankings file - {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')}",
+                rankings_json
+            )
+        
+        # Don't show success message to avoid spam
+        # st.success("✅ Rankings saved to GitHub!")
+        
+    except Exception as e:
+        st.error(f"Error saving to GitHub: {e}")
+        # Fallback to local file
+        save_rankings_local()
+
+def load_rankings_from_github(repo):
+    """Load user rankings from GitHub repository"""
+    try:
+        if repo is None:
+            # Fallback to local file
+            return load_rankings_local()
+        
+        try:
+            # Get file from repository
+            file = repo.get_contents(RANKINGS_FILE)
+            content = base64.b64decode(file.content).decode('utf-8')
+            rankings = json.loads(content)
+            return rankings
+        except:
+            # File doesn't exist yet, return empty rankings
+            return {
+                'nathan': [],
+                'nathaniel': [],
+                'jack': [],
+                'kyle': []
+            }
+        
+    except Exception as e:
+        st.error(f"Error loading from GitHub: {e}")
+        # Fallback to local file
+        return load_rankings_local()
+
+def save_rankings_local():
+    """Save user rankings to local JSON file (fallback)"""
     try:
         with open(RANKINGS_FILE, 'w') as f:
             json.dump(st.session_state.user_rankings, f, indent=2)
     except Exception as e:
-        st.error(f"Error saving rankings: {e}")
+        st.error(f"Error saving rankings locally: {e}")
 
-def load_rankings():
-    """Load user rankings from JSON file"""
+def load_rankings_local():
+    """Load user rankings from local JSON file (fallback)"""
     try:
         if os.path.exists(RANKINGS_FILE):
             with open(RANKINGS_FILE, 'r') as f:
@@ -39,7 +123,7 @@ def load_rankings():
                 'kyle': []
             }
     except Exception as e:
-        st.error(f"Error loading rankings: {e}")
+        st.error(f"Error loading rankings locally: {e}")
         return {
             'nathan': [],
             'nathaniel': [],
@@ -168,8 +252,10 @@ def main():
         st.session_state.drafted_players = set()
     if 'last_draft_refresh' not in st.session_state:
         st.session_state.last_draft_refresh = None
+    if 'github_repo' not in st.session_state:
+        st.session_state.github_repo = setup_github()
     if 'user_rankings' not in st.session_state:
-        st.session_state.user_rankings = load_rankings()
+        st.session_state.user_rankings = load_rankings_from_github(st.session_state.github_repo)
     # Sidebar for user selection
     with st.sidebar:
         st.header("👤 User Selection")
@@ -185,6 +271,21 @@ def main():
         
         st.markdown("---")
         st.header("🏈 Draft Status")
+        
+        # Debug info
+        with st.expander("🔧 Debug Info"):
+            st.write(f"**Current directory:** {os.getcwd()}")
+            st.write(f"**GitHub connected:** {'✅' if st.session_state.github_repo else '❌'}")
+            st.write(f"**Local file exists:** {os.path.exists(RANKINGS_FILE)}")
+            
+            # Show total rankings count
+            total_rankings = sum(len(rankings) for rankings in st.session_state.user_rankings.values())
+            st.write(f"**Total player rankings:** {total_rankings}")
+            
+            if st.button("🔄 Reload Rankings from GitHub"):
+                st.session_state.user_rankings = load_rankings_from_github(st.session_state.github_repo)
+                st.success("Rankings reloaded from GitHub!")
+                st.rerun()
         
         # Draft refresh button
         if st.button("🔄 Refresh Draft Data"):
@@ -356,7 +457,7 @@ def main():
                             with btn_col:
                                 if st.button("❌", key=f"remove_{selected_user}_{i}"):
                                     st.session_state.user_rankings[selected_user].remove(player_name)
-                                    save_rankings()  # Save after removing
+                                    save_rankings_to_github(st.session_state.github_repo)
                                     st.rerun()
                             
                             # Move up/down buttons
@@ -365,14 +466,14 @@ def main():
                                 if i > 0 and st.button("⬆️", key=f"up_{selected_user}_{i}"):
                                     rankings = st.session_state.user_rankings[selected_user]
                                     rankings[i], rankings[i-1] = rankings[i-1], rankings[i]
-                                    save_rankings()  # Save after reordering
+                                    save_rankings_to_github(st.session_state.github_repo)
                                     st.rerun()
                             
                             with move_col2:
                                 if i < len(valid_rankings) - 1 and st.button("⬇️", key=f"down_{selected_user}_{i}"):
                                     rankings = st.session_state.user_rankings[selected_user]
                                     rankings[i], rankings[i+1] = rankings[i+1], rankings[i]
-                                    save_rankings()  # Save after reordering
+                                    save_rankings_to_github(st.session_state.github_repo)
                                     st.rerun()
                             
                             st.divider()
@@ -428,7 +529,7 @@ def main():
                     with add_col:
                         if st.button("➕", key=f"add_{selected_user}_{player['PLAYER NAME']}"):
                             st.session_state.user_rankings[selected_user].append(player['PLAYER NAME'])
-                            save_rankings()  # Save after adding
+                            save_rankings_to_github(st.session_state.github_repo)
                             st.success(f"Added {player['PLAYER NAME']}!")
                             st.rerun()
                     
